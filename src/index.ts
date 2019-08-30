@@ -9,14 +9,14 @@ interface ContentDisposition {
 function parseContentDisposition(header: string): ContentDisposition {
     const parts = header.split(';').map((part) => part.trim());
     if (parts.shift() !== 'form-data') {
-        throw new Error('malformed content-disposition header');
+        throw new Error('malformed content-disposition header: missing "form-data" in `' + JSON.stringify(parts) + '`');
     }
 
     const out: any = {};
     for (const part of parts) {
         const kv = part.split('=');
         if (kv.length !== 2) {
-            throw new Error('malformed content-disposition header');
+            throw new Error('malformed content-disposition header: more than one equals sign in key-value set - ' + part + ' in `' + header + '`');
         }
 
         const [name, value] = kv;
@@ -25,12 +25,12 @@ function parseContentDisposition(header: string): ContentDisposition {
         } else if (value[0] !== '"' && value[value.length - 1] !== '"') {
             out[name] = value;
         } else if (value[0] === '"' && value[value.length - 1] !== '"' || value[0] !== '"' && value[value.length - 1] === '"') {
-            throw new Error('malformed content-disposition header');
+            throw new Error('malformed content-disposition header: mismatched quotations in `' + header + '`');
         }
     }
 
     if (!out.name) {
-        throw new Error('malformed content-disposition header');
+        throw new Error('malformed content-disposition header: missing field name in `' + header + '`');
     }
 
     return out;
@@ -53,7 +53,7 @@ function parsePart(lines: Uint8Array[]): Part {
 
         const colon = line.indexOf(':');
         if (colon === -1) {
-            throw new Error('malformed multipart-form header');
+            throw new Error('malformed multipart-form header: missing colon');
         }
 
         headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
@@ -61,7 +61,7 @@ function parsePart(lines: Uint8Array[]): Part {
 
     const contentDisposition = headers.get('content-disposition');
     if (!contentDisposition) {
-        throw new Error('malformed multipart-form header');
+        throw new Error('malformed multipart-form header: missing content-disposition');
     }
 
     return {

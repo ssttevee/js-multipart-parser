@@ -71,41 +71,52 @@ function parsePart(lines: Uint8Array[]): Part {
     };
 }
 
-type Matcher = (buf: Uint8Array) => boolean;
+const dash = '-'.charCodeAt(0);
 
-function matcher(a: Uint8Array): Matcher {
-    return (b: Uint8Array): boolean => a.length === b.length && a.every((x: number, i: number) => x === b[i]);
-}
+const MatchTypeBoundary = Symbol('boundary');
+const MatchTypeEnd = Symbol('end');
 
-function boundaryMatcher(boundary: string): [Matcher, Matcher] {
-    const buf = stringToArray('--' + boundary + '--');
-    return [
-        matcher(buf.slice(0, -2)),
-        matcher(buf),
-    ]
+type MatchType = typeof MatchTypeBoundary | typeof MatchTypeEnd;
+
+class BoundaryMatcher {
+    private boundary: Uint8Array;
+
+    public constructor(boundary: string) {
+        this.boundary = stringToArray('--' + boundary);
+    }
+
+    public match(buf: Uint8Array): MatchType | null {
+        if ((this.boundary.length !== buf.length && this.boundary.length !== buf.length - 2) ||
+            !this.boundary.every((x: number, i: number) => x === buf[i]) ||
+            (this.boundary.length < buf.length && !buf.slice(-2).every((x: number) => x === dash))) {
+            return null;
+        }
+
+        return this.boundary.length === buf.length ? MatchTypeBoundary : MatchTypeEnd;
+    }
 }
 
 const CRLF = stringToArray('\r\n');
 
 export async function parseMultipart(body: ReadableStream<Uint8Array>, boundary: string): Promise<Part[]> {
-    const [isBoundary, isEnd] = boundaryMatcher(boundary);
+    const matcher = new BoundaryMatcher(boundary);
     const parts: Part[] = [];
 
-    let current: Uint8Array[] | null = null;
+    let current: Uint8Array[] | null = null, match: MatchType | null = null;
     for await (const line of new StreamSearch(CRLF, body).arrays()) {
-        if (isBoundary(line)) {
-            if (current) {
-                parts.push(parsePart(current));
-            }
+        if ((match = matcher.match(line)) && current) {
+            parts.push(parsePart(current));
+        }
 
-            current = [];
-        } else if (isEnd(line)) {
-            if (current) {
-                parts.push(parsePart(current));
-            }
+        switch (match) {
+            case MatchTypeBoundary:
+                current = [];
+                continue;
+            case MatchTypeEnd:
+                return parts;
+        }
 
-            return parts;
-        } else if (current) {
+        if (current) {
             current.push(line);
         }
     }

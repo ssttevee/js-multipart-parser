@@ -104,11 +104,11 @@ export async function parseMultipart(body: ReadableStream<Uint8Array>, boundary:
                 parts.push(parsePart(current));
             }
 
-            break;
+            return parts;
         } else if (current) {
             current.push(line);
         }
     }
 
-    return parts;
+    throw new Error('malformed multipart-form data: unexpected end of stream');
 }

@@ -98,14 +98,13 @@ class BoundaryMatcher {
 
 const CRLF = stringToArray('\r\n');
 
-export async function parseMultipart(body: ReadableStream<Uint8Array>, boundary: string): Promise<Part[]> {
+export async function *iterateMultipart(body: ReadableStream<Uint8Array>, boundary: string): AsyncIterableIterator<Part> {
     const matcher = new BoundaryMatcher(boundary);
-    const parts: Part[] = [];
 
     let current: Uint8Array[] | null = null, match: MatchType | null = null;
     for await (const line of new StreamSearch(CRLF, body).arrays()) {
         if ((match = matcher.match(line)) && current) {
-            parts.push(parsePart(current));
+            yield parsePart(current);
         }
 
         switch (match) {
@@ -113,7 +112,7 @@ export async function parseMultipart(body: ReadableStream<Uint8Array>, boundary:
                 current = [];
                 continue;
             case MatchTypeEnd:
-                return parts;
+                return;
         }
 
         if (current) {
@@ -122,4 +121,13 @@ export async function parseMultipart(body: ReadableStream<Uint8Array>, boundary:
     }
 
     throw new Error('malformed multipart-form data: unexpected end of stream');
+}
+
+export async function parseMultipart(body: ReadableStream<Uint8Array>, boundary: string): Promise<Part[]> {
+    const parts: Part[] = [];
+    for await (const part of iterateMultipart(body, boundary)) {
+        parts.push(part);
+    }
+
+    return parts;
 }

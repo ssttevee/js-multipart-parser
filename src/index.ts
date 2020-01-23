@@ -1,6 +1,9 @@
 import { StreamSearch } from '@ssttevee/streamsearch';
 import { stringToArray, arrayToString, mergeArrays } from '@ssttevee/u8-utils';
 
+const dash = '--';
+const CRLF = '\r\n';
+
 interface ContentDisposition {
     name: string;
     filename?: string;
@@ -36,6 +39,12 @@ function parseContentDisposition(header: string): ContentDisposition {
     return out;
 }
 
+function splitHeaderAndBody(bodyPart: string): [string[], Uint8Array] {
+    const lines = bodyPart.split(CRLF);
+    const boundary = lines.indexOf('');
+    return [ lines.slice(0, boundary), stringToArray(lines.slice(boundary + 1).join(CRLF)) ];
+}
+
 export interface Part {
     name: string;
     data: Uint8Array;
@@ -43,14 +52,12 @@ export interface Part {
     contentType?: string;
 }
 
-function parsePart(lines: Uint8Array[]): Part {
+function parsePart(bodyPart: string): Part {
+    const [ lines, data ] = splitHeaderAndBody(bodyPart);
+
     const headers = new Headers();
     while (lines.length) {
-        const line = arrayToString(lines.shift()!);
-        if (!line.length) {
-            break;
-        }
-
+        const line = lines.shift()!;
         const colon = line.indexOf(':');
         if (colon === -1) {
             throw new Error('malformed multipart-form header: missing colon');
@@ -67,56 +74,32 @@ function parsePart(lines: Uint8Array[]): Part {
     return {
         ...parseContentDisposition(contentDisposition),
         contentType: headers.get('content-type') || undefined,
-        data: mergeArrays(...lines),
+        data,
     };
 }
 
-const dash = '-'.charCodeAt(0);
-
-const MatchTypeBoundary = Symbol('boundary');
-const MatchTypeEnd = Symbol('end');
-
-type MatchType = typeof MatchTypeBoundary | typeof MatchTypeEnd;
-
-class BoundaryMatcher {
-    private boundary: Uint8Array;
-
-    public constructor(boundary: string) {
-        this.boundary = stringToArray('--' + boundary);
-    }
-
-    public match(buf: Uint8Array): MatchType | null {
-        if ((this.boundary.length !== buf.length && this.boundary.length !== buf.length - 2) ||
-            !this.boundary.every((x: number, i: number) => x === buf[i]) ||
-            (this.boundary.length < buf.length && !buf.slice(-2).every((x: number) => x === dash))) {
-            return null;
-        }
-
-        return this.boundary.length === buf.length ? MatchTypeBoundary : MatchTypeEnd;
-    }
-}
-
-const CRLF = stringToArray('\r\n');
-
 export async function *iterateMultipart(body: ReadableStream<Uint8Array>, boundary: string): AsyncIterableIterator<Part> {
-    const matcher = new BoundaryMatcher(boundary);
+    const it = new StreamSearch(stringToArray(dash + boundary), body).strings();
 
-    let current: Uint8Array[] | null = null, match: MatchType | null = null;
-    for await (const line of new StreamSearch(CRLF, body).arrays()) {
-        if ((match = matcher.match(line)) && current) {
-            yield parsePart(current);
+    // discard prologue
+    if ((await it.next()).done) {
+        return;
+    }
+
+    let bodyParts: string[] = [];
+    for await (const bodyPart of it) {
+        if (!bodyParts.length && bodyPart.slice(0, 2) === dash) {
+            // end of multipart payload, beginning of epilogue
+            return;
         }
 
-        switch (match) {
-            case MatchTypeBoundary:
-                current = [];
-                continue;
-            case MatchTypeEnd:
-                return;
-        }
+        bodyParts.push(bodyPart);
 
-        if (current) {
-            current.push(line);
+        // the next boundary only counts when prefaced with a CRLF,
+        // it is otherwise part of the current body part
+        if (bodyPart.slice(-2) === CRLF) {
+            yield parsePart(bodyParts.join(dash + boundary).slice(2, -2));
+            bodyParts = [];
         }
     }
 

@@ -17,9 +17,9 @@ function parseContentDisposition(header: string): ContentDisposition {
 
     const out: any = {};
     for (const part of parts) {
-        const kv = part.split('=');
+        const kv = part.split('=', 2);
         if (kv.length !== 2) {
-            throw new Error('malformed content-disposition header: more than one equals sign in key-value set - ' + part + ' in `' + header + '`');
+            throw new Error('malformed content-disposition header: key-value pair not found - ' + part + ' in `' + header + '`');
         }
 
         const [name, value] = kv;

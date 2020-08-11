@@ -1,8 +1,24 @@
-import { StreamSearch } from '@ssttevee/streamsearch';
+import { ReadableStreamSearch, StreamSearch, MATCH, Token } from '@ssttevee/streamsearch';
 import { stringToArray, arrayToString, mergeArrays } from '@ssttevee/u8-utils';
 
-const dash = '--';
-const CRLF = '\r\n';
+const mergeArrays2: (arrays: Uint8Array[]) => Uint8Array = Function.prototype.apply.bind(mergeArrays, undefined);
+
+const dash = stringToArray('--');
+const CRLF = stringToArray('\r\n');
+
+function arrayEquals(a: Uint8Array, b: Uint8Array): boolean {
+    if (a.length !== b.length) {
+        return false;
+    }
+
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 interface ContentDisposition {
     name: string;
@@ -39,71 +55,223 @@ function parseContentDisposition(header: string): ContentDisposition {
     return out;
 }
 
-function splitHeaderAndBody(bodyPart: string): [string[], Uint8Array] {
-    const lines = bodyPart.split(CRLF);
-    const boundary = lines.indexOf('');
-    return [ lines.slice(0, boundary), stringToArray(lines.slice(boundary + 1).join(CRLF)) ];
-}
-
-export interface Part {
+export interface Part<TData = Uint8Array> {
     name: string;
-    data: Uint8Array;
+    data: TData;
     filename?: string;
     contentType?: string;
 }
 
-function parsePart(bodyPart: string): Part {
-    const [ lines, data ] = splitHeaderAndBody(bodyPart);
+function parsePartHeaders(lines: string[]): Omit<Part, 'data'> {
+    const entries = [];
+    let disposition = false;
 
-    const headers = new Headers();
-    while (lines.length) {
-        const line = lines.shift()!;
+    let line: string | undefined;
+    while (typeof (line = lines.shift()) !== 'undefined') {
         const colon = line.indexOf(':');
         if (colon === -1) {
             throw new Error('malformed multipart-form header: missing colon');
         }
 
-        headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
+        const header = line.slice(0, colon).trim().toLowerCase();
+        const value = line.slice(colon + 1).trim();
+        switch (header) {
+            case 'content-disposition':
+                disposition = true;
+                entries.push(...Object.entries(parseContentDisposition(value)));
+                break;
+
+            case 'content-type':
+                entries.push(['contentType', value]);
+        }
     }
 
-    const contentDisposition = headers.get('content-disposition');
-    if (!contentDisposition) {
+    if (!disposition) {
         throw new Error('malformed multipart-form header: missing content-disposition');
     }
 
-    return {
-        ...parseContentDisposition(contentDisposition),
-        contentType: headers.get('content-type') || undefined,
-        data,
-    };
+    return Object.fromEntries(entries);
 }
 
-export async function *iterateMultipart(body: ReadableStream<Uint8Array>, boundary: string): AsyncIterableIterator<Part> {
-    const it = new StreamSearch(stringToArray(dash + boundary), body).strings();
+async function readHeaderLines(it: AsyncIterableIterator<Token>, needle: Uint8Array): Promise<[string[] | undefined, Uint8Array]> {
+    let firstChunk = true;
+    let lastTokenWasMatch = false;
+    const headerLines: Uint8Array[][] = [[]];
+
+    const crlfSearch = new StreamSearch(CRLF);
+
+    for (; ;) {
+        const result = await it.next();
+        if (result.done) {
+            throw new Error('malformed multipart-form data: unexpected end of stream');
+        }
+
+        if (firstChunk && result.value !== MATCH && arrayEquals(result.value.slice(0, 2), dash)) {
+            // end of multipart payload, beginning of epilogue
+            return [undefined, new Uint8Array()];
+        }
+
+        let chunk: Uint8Array
+        if (result.value !== MATCH) {
+            chunk = result.value;
+        } else if (!lastTokenWasMatch) {
+            chunk = needle;
+        } else {
+            throw new Error('malformed multipart-form data: unexpected boundary');
+        }
+
+        if (!chunk.length) {
+            continue;
+        }
+
+        if (firstChunk) {
+            firstChunk = false;
+        }
+
+        const tokens = crlfSearch.feed(chunk);
+        for (const [i, token] of tokens.entries()) {
+            const isMatch = token === MATCH;
+            if (!isMatch && !(token as Uint8Array).length) {
+                continue;
+            }
+
+            if (lastTokenWasMatch && isMatch) {
+                tokens.push(crlfSearch.end());
+
+                return [
+                    headerLines.filter((chunks) => chunks.length).map(mergeArrays2).map(arrayToString),
+                    mergeArrays(...tokens.slice(i + 1).map((token) => token === MATCH ? CRLF : token)),
+                ];
+            }
+
+            if (lastTokenWasMatch = isMatch) {
+                headerLines.push([]);
+            } else {
+                headerLines[headerLines.length-1].push(token as Uint8Array);
+            }
+        }
+    }
+}
+
+export async function* streamMultipart(body: ReadableStream<Uint8Array>, boundary: string): AsyncIterableIterator<Part<AsyncIterableIterator<Uint8Array>>> {
+    const needle = mergeArrays(dash, stringToArray(boundary));
+    const it = new ReadableStreamSearch(needle, body)[Symbol.asyncIterator]();
 
     // discard prologue
-    if ((await it.next()).done) {
-        return;
-    }
-
-    let bodyParts: string[] = [];
-    for await (const bodyPart of it) {
-        if (!bodyParts.length && bodyPart.slice(0, 2) === dash) {
-            // end of multipart payload, beginning of epilogue
+    for (; ;) {
+        const result = await it.next();
+        if (result.done) {
+            // EOF
             return;
         }
 
-        bodyParts.push(bodyPart);
-
-        // the next boundary only counts when prefaced with a CRLF,
-        // it is otherwise part of the current body part
-        if (bodyPart.slice(-2) === CRLF) {
-            yield parsePart(bodyParts.join(dash + boundary).slice(2, -2));
-            bodyParts = [];
+        if (result.value === MATCH) {
+            break;
         }
     }
 
-    throw new Error('malformed multipart-form data: unexpected end of stream');
+    const crlfSearch = new StreamSearch(CRLF);
+
+    for (; ;) {
+        const [headerLines, tail] = await readHeaderLines(it, needle);
+        if (!headerLines) {
+            return;
+        }
+
+        async function nextToken(): Promise<IteratorYieldResult<Token>> {
+            const result = await it.next();
+            if (result.done) {
+                throw new Error('malformed multipart-form data: unexpected end of stream');
+            }
+
+            return result;
+        }
+
+        let trailingCRLF = false;
+        function feedChunk(chunk: Uint8Array): Uint8Array {
+            const chunks: Uint8Array[] = [];
+            for (const token of crlfSearch.feed(chunk)) {
+                if (trailingCRLF) {
+                    chunks.push(CRLF);
+                }
+
+                if (!(trailingCRLF = token === MATCH)) {
+                    chunks.push(token);
+                }
+            }
+
+            return mergeArrays(...chunks);
+        }
+
+        let done = false;
+        async function nextChunk(): Promise<IteratorYieldResult<Uint8Array>> {
+            const result = await nextToken();
+
+            let chunk: Uint8Array
+            if (result.value !== MATCH) {
+                chunk = result.value;
+            } else if (!trailingCRLF) {
+                chunk = CRLF;
+            } else {
+                done = true;
+                return { value: crlfSearch.end() };
+            }
+
+            return { value: feedChunk(chunk) };
+        }
+
+        const bufferedChunks: IteratorYieldResult<Uint8Array>[] = [{value: feedChunk(tail)}];
+
+        yield {
+            ...parsePartHeaders(headerLines),
+            data: {
+                [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
+                    return this;
+                },
+                async next(): Promise<IteratorResult<Uint8Array>> {
+                    for (; ;) {
+                        const result = bufferedChunks.shift();
+                        if (!result) {
+                            break;
+                        }
+
+                        if (result.value.length > 0) {
+                            return result;
+                        }
+                    }
+
+                    for (; ;) {
+                        if (done) {
+                            return { done, value: undefined };
+                        }
+
+                        const result = await nextChunk();
+                        if (result.value.length > 0) {
+                            return result;
+                        }
+                    }
+                },
+            },
+        };
+
+        while (!done) {
+            bufferedChunks.push(await nextChunk());
+        }
+    }
+}
+
+export async function *iterateMultipart(body: ReadableStream<Uint8Array>, boundary: string): AsyncIterableIterator<Part> {
+    for await (const part of streamMultipart(body, boundary)) {
+        const chunks = [];
+        for await (const chunk of part.data) {
+            chunks.push(chunk);
+        }
+
+        yield {
+            ...part,
+            data: mergeArrays(...chunks),
+        };
+    }
 }
 
 export async function parseMultipart(body: ReadableStream<Uint8Array>, boundary: string): Promise<Part[]> {

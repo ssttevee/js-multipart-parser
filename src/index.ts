@@ -1,24 +1,10 @@
 import { ReadableStreamSearch, StreamSearch, MATCH, Token } from '@ssttevee/streamsearch';
-import { stringToArray, arrayToString, mergeArrays } from '@ssttevee/u8-utils';
+import { arraysEqual, stringToArray, arrayToString, mergeArrays } from '@ssttevee/u8-utils';
 
 const mergeArrays2: (arrays: Uint8Array[]) => Uint8Array = Function.prototype.apply.bind(mergeArrays, undefined);
 
 const dash = stringToArray('--');
 const CRLF = stringToArray('\r\n');
-
-function arrayEquals(a: Uint8Array, b: Uint8Array): boolean {
-    if (a.length !== b.length) {
-        return false;
-    }
-
-    for (let i = 0; i < a.length; i++) {
-        if (a[i] !== b[i]) {
-            return false;
-        }
-    }
-
-    return true;
-}
 
 interface ContentDisposition {
     name: string;
@@ -106,7 +92,7 @@ async function readHeaderLines(it: AsyncIterableIterator<Token>, needle: Uint8Ar
             throw new Error('malformed multipart-form data: unexpected end of stream');
         }
 
-        if (firstChunk && result.value !== MATCH && arrayEquals(result.value.slice(0, 2), dash)) {
+        if (firstChunk && result.value !== MATCH && arraysEqual(result.value.slice(0, 2), dash)) {
             // end of multipart payload, beginning of epilogue
             return [undefined, new Uint8Array()];
         }

@@ -5,13 +5,13 @@ A simple `multipart/form-data` parser for use with `ReadableStream`s.
 # Installation
 
 ```bash
-npm install @ssttevee/streamsearch
+npm install @ssttevee/multipart-parser
 ```
 
 # Example
 
 ```js
-import { parseMultipart } from '@ssttevee/streamsearch';
+import { parseMultipart } from '@ssttevee/multipart-parser';
 
 ...
 

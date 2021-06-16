@@ -24,6 +24,7 @@ const expectedParts = [
     { name: 'a', data: 'form value a' },
     { name: 'b', data: 'file value b', filename: 'b.txt' },
     { name: 'c', data: 'file value c\r\nhas\r\nsome new \r\n lines', filename: 'c.txt', contentType: 'text/plain' },
+    { name: 'd', data: 'weird title', filename: 'd=.txt', contentType: 'text/plain' },
 ];
 
 const boundary = 'some random boundary';

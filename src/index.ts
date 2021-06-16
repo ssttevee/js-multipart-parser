@@ -11,27 +11,79 @@ interface ContentDisposition {
     filename?: string;
 }
 
+function splitSemis(str: string): string[] {
+    const result = [];
+    let staged = '';
+    let quoted = false;
+    let escaped = false;
+    for (const char of str) {
+        if (!escaped) {
+            if (char === '"') {
+                quoted = !quoted;
+            } else if (char === '\\' && quoted) {
+                escaped = true;
+            } else if (char === ';' && !quoted) {
+                result.push(staged);
+                staged = '';
+                continue;
+            }
+        } else {
+            escaped = false;
+        }
+
+        staged += char;
+    }
+
+    result.push(staged);
+
+    return result;
+}
+
+function parseKeyValue(str: string): [string, string] {
+    const equals = str.indexOf('=');
+    if (equals < 0) {
+        throw new Error('malformed key-value string: missing value in `' + str + '`');
+    }
+
+    const key = str.slice(0, equals);
+    const rawValue = str.slice(equals + 1);
+
+    let value = '';
+    if (rawValue.startsWith('"')) {
+        if (!rawValue.endsWith('"')) {
+            throw new Error('malformed key-value string: mismatched quotations in `' + rawValue + '`');
+        }
+
+        let escaped = false;
+        for (const char of rawValue.slice(1, rawValue.length - 1)) {
+            if (char === '\\' && !escaped) {
+                escaped = true;
+                continue;
+            }
+
+            if (escaped) {
+                escaped = false;
+            }
+
+            value += char;
+        }
+    } else {
+        value = rawValue;
+    }
+
+    return [key, value];
+}
+
 function parseContentDisposition(header: string): ContentDisposition {
-    const parts = header.split(';').map((part) => part.trim());
+    const parts = splitSemis(header).map((part) => part.trim());
     if (parts.shift() !== 'form-data') {
         throw new Error('malformed content-disposition header: missing "form-data" in `' + JSON.stringify(parts) + '`');
     }
 
     const out: any = {};
     for (const part of parts) {
-        const kv = part.split('=', 2);
-        if (kv.length !== 2) {
-            throw new Error('malformed content-disposition header: key-value pair not found - ' + part + ' in `' + header + '`');
-        }
-
-        const [name, value] = kv;
-        if (value[0] === '"' && value[value.length - 1] === '"') {
-            out[name] = value.slice(1, -1).replace(/\\"/g, '"');
-        } else if (value[0] !== '"' && value[value.length - 1] !== '"') {
-            out[name] = value;
-        } else if (value[0] === '"' && value[value.length - 1] !== '"' || value[0] !== '"' && value[value.length - 1] === '"') {
-            throw new Error('malformed content-disposition header: mismatched quotations in `' + header + '`');
-        }
+        const [name, value] = parseKeyValue(part);
+        out[name] = value;
     }
 
     if (!out.name) {
